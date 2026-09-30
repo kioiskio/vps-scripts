@@ -108,17 +108,43 @@ def check_stock():
                     raise RuntimeError(f"找不到 {plan} 行，页面结构可能变了")
                 row.hover()
                 pg.wait_for_timeout(900)
-                # hover 验证：出现 Not available tooltip = 没货
+                # 反向信号：明确的缺货提示 / 禁用态
                 tip = pg.locator('text=Not available. Please choose another location or type.')
                 unavailable = tip.count() > 0
-                # 辅助信号：disabled / aria-disabled
                 try:
                     dis = row.evaluate(
                         "el => el.closest('[disabled],[aria-disabled=\"true\"],.disabled') !== null")
                 except Exception:
                     dis = False
-                result[plan] = (not unavailable) and (not dis)
-                log(f"{plan}: hover无缺货提示={not unavailable} 非禁用={not dis} -> {'有货' if result[plan] else '无货'}")
+                # 正向证据：点选该行，确认出现选中态（而不是"没看到缺货提示就算有货"）
+                selected = False
+                if not unavailable and not dis:
+                    try:
+                        row.click()
+                        pg.wait_for_timeout(1200)
+                        selected = bool(row.evaluate("""el => {
+                            const r = el.closest('[role="radio"],[role="option"],label') || el;
+                            return r.getAttribute('aria-checked') === 'true'
+                                || r.getAttribute('aria-selected') === 'true'
+                                || (r.className && (r.className.includes('selected')
+                                                    || r.className.includes('active')))
+                                || !!r.querySelector('[data-selected="true"],.selected,.checkmark');
+                        }"""))
+                        if not selected:
+                            # 汇总区出现该 plan 名称也是正向证据
+                            selected = pg.locator(
+                                '.summary,[data-testid*="summary" i]').get_by_text(plan).count() > 0
+                    except Exception:
+                        selected = False
+                if unavailable or dis:
+                    result[plan] = False
+                    log(f"{plan}: 明确无货（缺货提示={unavailable} 禁用={dis}）")
+                elif selected:
+                    result[plan] = True
+                    log(f"{plan}: 正向证据确认有货（点选后出现选中态）")
+                else:
+                    pg.screenshot(path=os.path.join(WORKDIR, "last-check.png"))
+                    raise RuntimeError(f"{plan}：无缺货提示但也无法确认选中态，判为未知，不下单")
             pg.screenshot(path=os.path.join(WORKDIR, "last-check.png"))
             return result["CX33"], result["CX43"], note
         finally:
@@ -186,11 +212,22 @@ def main():
         return 1
 
     if cx43:
-        log("CX43 Helsinki 有货")
+        log("CX43 Helsinki 有货（正向证据确认）")
         if DRY_RUN:
             log("DRY-RUN：演习模式，不下单")
             notify(cfg, "Hetzner 监控自检：CX43 Helsinki 有货（演习模式，未下单）。"
-                         "确认无误后，取消演习即可按授权自动建机。")
+                         "确认无误后，手动开启自动建机才会按授权下单。")
+            return 0
+        if not cfg.get("auto_create", False):
+            log("自动建机未启用，只通知不下单")
+            if throttled(cfg, "last_stock_notify", hours=6):
+                notify(cfg,
+                    "Hetzner 监控：CX43 Helsinki 有货！但自动建机还没开（等你确认演习结果）。\n"
+                    "确认要建，在 VPS 上跑：\n"
+                    "python3 -c \"import json;p='/root/.cx-monitor/config.json';"
+                    "c=json.load(open(p));c['auto_create']=True;"
+                    "json.dump(c,open(p,'w'),indent=2)\"")
+                save_cfg(cfg)
             return 0
         log("按授权自动建机")
         try:
