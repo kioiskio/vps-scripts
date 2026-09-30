@@ -59,9 +59,9 @@ print('')")
 [[ -n "$FW_ID" ]] && echo "    firewall id=$FW_ID" || echo "    未发现挂载的防火墙，新机器将不挂防火墙"
 
 # SSH key：用 authorized_keys 跟 API 列出的 key 做匹配
-SSH_KEY_NAME=$(python3 - "$API_TOKEN" <<'PYEOF'
-import json,sys,urllib.request
-token=sys.argv[1]
+SSH_KEY_NAME=$(CX_API_TOKEN="$API_TOKEN" python3 - <<'PYEOF'
+import json,os,urllib.request
+token=os.environ["CX_API_TOKEN"]
 req=urllib.request.Request("https://api.hetzner.cloud/v1/ssh_keys",
     headers={"Authorization":f"Bearer {token}"})
 keys=json.load(urllib.request.urlopen(req))["ssh_keys"]
@@ -79,10 +79,11 @@ PYEOF
 echo "==> 4/6 一次性登录 console.hetzner.com（密码仅本次使用，不存盘）"
 read -rp "    Hetzner 账号邮箱: " H_EMAIL
 read -rsp "    密码: " H_PASS; echo
-"$VPY" - "$WORKDIR" "$H_EMAIL" "$H_PASS" <<'PYEOF'
-import sys
+CX_H_EMAIL="$H_EMAIL" CX_H_PASS="$H_PASS" "$VPY" - "$WORKDIR" <<'PYEOF'
+import os, sys
 from playwright.sync_api import sync_playwright
-workdir, email, password = sys.argv[1], sys.argv[2], sys.argv[3]
+workdir = sys.argv[1]
+email, password = os.environ["CX_H_EMAIL"], os.environ["CX_H_PASS"]
 with sync_playwright() as p:
     ctx = p.chromium.launch_persistent_context(workdir + "/profile", headless=True,
         args=["--disable-blink-features=AutomationControlled"])
@@ -129,10 +130,12 @@ print(ids[-1] if ids else '')" 2>/dev/null)
 fi
 [[ -n "$TG_CHAT" ]] && echo "    Telegram 通知目标 chat_id=$TG_CHAT" || echo "    跳过 Telegram 通知（只写日志）"
 
-# 写配置（0600）
-python3 - "$WORKDIR" "$API_TOKEN" "$IMAGE" "$SSH_KEY_NAME" "$FW_ID" "$TG_TOKEN" "$TG_CHAT" <<'PYEOF'
-import json,sys,os
-w, token, image, key, fw, tg_token, tg_chat = sys.argv[1:8]
+# 写配置（0600），密钥走环境变量，不进 argv
+CX_API_TOKEN="$API_TOKEN" CX_TG_TOKEN="$TG_TOKEN" "$VPY" - "$WORKDIR" "$IMAGE" "$SSH_KEY_NAME" "$FW_ID" "$TG_CHAT" <<'PYEOF'
+import json,os,sys
+w, image, key, fw, tg_chat = sys.argv[1:6]
+token = os.environ["CX_API_TOKEN"]
+tg_token = os.environ.get("CX_TG_TOKEN") or None
 cfg = {"api_token": token, "image": image, "ssh_key": key,
        "firewall_id": int(fw) if fw else None,
        "telegram_token": tg_token or None, "telegram_chat_id": tg_chat or None,
@@ -175,10 +178,15 @@ WantedBy=timers.target
 EOF
 
 systemctl daemon-reload
-systemctl enable --now cx-monitor.timer
-echo "    定时任务已启用（每小时 :08 跑一次）"
+echo "    定时任务已写入（先不启用，等演习通过）"
 
-echo "==> 首次试运行"
-"$VPY" "$WORKDIR/cx-monitor.py" || echo "    首次检查未完成，详见上方日志"
+echo "==> 首次试运行（演习模式：只查库存，绝不下单）"
+if "$VPY" "$WORKDIR/cx-monitor.py" --dry-run; then
+  systemctl enable --now cx-monitor.timer
+  echo "    演习通过，定时任务已启用（每小时 :08 跑一次）"
+else
+  echo "    演习没通过，定时任务未启用。请看上方日志排查，或重跑本脚本。"
+  exit 1
+fi
 echo
 echo "完成。日志：$WORKDIR/check.log ；截图：$WORKDIR/last-check.png"
