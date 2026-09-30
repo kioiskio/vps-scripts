@@ -156,7 +156,7 @@ PYEOF
 unset API_TOKEN H_PASS
 
 echo "==> 6/6 下载监控脚本 + 写入 systemd 定时任务"
-RAW=https://raw.githubusercontent.com/kioiskio/vps-scripts/main
+RAW=https://raw.githubusercontent.com/kioiskio/vps-scripts/710f1715e40def7284a15e03f31e92680a8d5bb9
 curl -fsSL -o "$WORKDIR/cx-monitor.py" "$RAW/cx-monitor.py"
 curl -fsSL -o "$WORKDIR/relogin.py"  "$RAW/relogin.py"
 chmod 700 "$WORKDIR/cx-monitor.py" "$WORKDIR/relogin.py"
