@@ -35,45 +35,48 @@ echo "==> 2/6 配置 Hetzner Cloud API token"
 echo "    去 console.hetzner.com → 顶部头像/账户 → Security → API tokens → Generate API token"
 echo "    权限选 Read & write（建服务器需要写权限），名字随便填比如 cx-monitor"
 read -rsp "    粘贴 API token: " API_TOKEN; echo
-if ! curl -fsS -H "Authorization: Bearer $API_TOKEN" https://api.hetzner.cloud/v1/servers >/dev/null; then
+if ! CX_API_TOKEN="$API_TOKEN" python3 - <<'PYEOF' >/dev/null 2>&1
+import os, urllib.request
+req = urllib.request.Request("https://api.hetzner.cloud/v1/servers",
+    headers={"Authorization": "Bearer " + os.environ["CX_API_TOKEN"]})
+urllib.request.urlopen(req, timeout=20).read()
+PYEOF
+then
   echo "    token 无效或没权限，退出。请重跑本脚本。"; exit 1
 fi
 echo "    token 有效"
 
 echo "==> 3/6 读取 kio-dev-2 的配置（镜像 / SSH key / 防火墙）"
-SRV_JSON=$(curl -fsS -H "Authorization: Bearer $API_TOKEN" "https://api.hetzner.cloud/v1/servers?name=kio-dev-2")
-SRV_ID=$(echo "$SRV_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['servers'][0]['id'])")
-IMAGE=$(echo "$SRV_JSON" | python3 -c "import json,sys; s=json.load(sys.stdin)['servers'][0]; print(s['image']['name'] or s['image']['id'])")
-echo "    kio-dev-2: id=$SRV_ID image=$IMAGE"
-
-# 防火墙：找挂了 kio-dev-2 的那个
-FW_ID=$(curl -fsS -H "Authorization: Bearer $API_TOKEN" https://api.hetzner.cloud/v1/firewalls | \
-  python3 -c "
-import json,sys
-sid=$SRV_ID
-for fw in json.load(sys.stdin)['firewalls']:
-    for r in fw.get('resources',[]):
-        if r.get('type')=='server' and r.get('server',{}).get('id')==sid:
-            print(fw['id']); raise SystemExit
-print('')")
-[[ -n "$FW_ID" ]] && echo "    firewall id=$FW_ID" || echo "    未发现挂载的防火墙，新机器将不挂防火墙"
-
-# SSH key：用 authorized_keys 跟 API 列出的 key 做匹配
-SSH_KEY_NAME=$(CX_API_TOKEN="$API_TOKEN" python3 - <<'PYEOF'
-import json,os,urllib.request
-token=os.environ["CX_API_TOKEN"]
-req=urllib.request.Request("https://api.hetzner.cloud/v1/ssh_keys",
-    headers={"Authorization":f"Bearer {token}"})
-keys=json.load(urllib.request.urlopen(req))["ssh_keys"]
-auth=open("/root/.ssh/authorized_keys").read().split()
-found=""
-for k in keys:
-    parts=k["public_key"].split()
-    if len(parts)>=2 and parts[1] in auth:
-        found=k["name"]; break
-print(found)
+eval "$(CX_API_TOKEN="$API_TOKEN" python3 - <<'PYEOF'
+import json, os, urllib.request
+token = os.environ["CX_API_TOKEN"]
+def get(path):
+    req = urllib.request.Request("https://api.hetzner.cloud" + path,
+        headers={"Authorization": "Bearer " + token})
+    return json.load(urllib.request.urlopen(req, timeout=20))
+srv = get("/v1/servers?name=kio-dev-2")["servers"][0]
+sid = srv["id"]
+img = srv["image"]["name"] or srv["image"]["id"]
+fw_id = ""
+for fw in get("/v1/firewalls")["firewalls"]:
+    for r in fw.get("resources", []):
+        if r.get("type") == "server" and r.get("server", {}).get("id") == sid:
+            fw_id = str(fw["id"]); break
+    if fw_id: break
+auth = open("/root/.ssh/authorized_keys").read().split()
+key_name = ""
+for k in get("/v1/ssh_keys")["ssh_keys"]:
+    parts = k["public_key"].split()
+    if len(parts) >= 2 and parts[1] in auth:
+        key_name = k["name"]; break
+print(f"SRV_ID={sid}")
+print(f"IMAGE={img}")
+print(f"FW_ID={fw_id}")
+print(f"SSH_KEY_NAME={key_name}")
 PYEOF
-)
+)"
+echo "    kio-dev-2: id=$SRV_ID image=$IMAGE"
+[[ -n "$FW_ID" ]] && echo "    firewall id=$FW_ID" || echo "    未发现挂载的防火墙，新机器将不挂防火墙"
 [[ -n "$SSH_KEY_NAME" ]] && echo "    ssh key=$SSH_KEY_NAME" || { echo "    没匹配到 SSH key，退出"; exit 1; }
 
 echo "==> 4/6 一次性登录 console.hetzner.com（密码仅本次使用，不存盘）"
@@ -113,17 +116,20 @@ TG_TOKEN=$(grep -E '^TELEGRAM_BOT_TOKEN=' /root/.hermes/.env 2>/dev/null | cut -
 TG_CHAT=""
 if [[ -n "$TG_TOKEN" ]]; then
   for i in 1 2 3; do
-    TG_CHAT=$(curl -fsS "https://api.telegram.org/bot${TG_TOKEN}/getUpdates" | \
-      python3 -c "
-import json,sys
-ids=[]
-try:
-  for u in json.load(sys.stdin).get('result',[]):
-    m=u.get('message') or {}
-    c=m.get('chat') or {}
-    if c.get('type')=='private': ids.append(str(c['id']))
-except Exception: pass
-print(ids[-1] if ids else '')" 2>/dev/null)
+    TG_CHAT=$(CX_TG_TOKEN="$TG_TOKEN" python3 - <<'PYEOF' 2>/dev/null
+import json, os, urllib.request
+tok = os.environ["CX_TG_TOKEN"]
+req = urllib.request.Request(f"https://api.telegram.org/bot{tok}/getUpdates")
+data = json.load(urllib.request.urlopen(req, timeout=20))
+ids = []
+for u in data.get("result", []):
+    m = u.get("message") or {}
+    c = m.get("chat") or {}
+    if c.get("type") == "private":
+        ids.append(str(c["id"]))
+print(ids[-1] if ids else "")
+PYEOF
+)
     [[ -n "$TG_CHAT" ]] && break
     read -rp "    没找到聊天记录：请先给你的 bot 发任意一条消息，然后回车: " _
   done
@@ -138,8 +144,10 @@ token = os.environ["CX_API_TOKEN"]
 tg_token = os.environ.get("CX_TG_TOKEN") or None
 cfg = {"api_token": token, "image": image, "ssh_key": key,
        "firewall_id": int(fw) if fw else None,
-       "telegram_token": tg_token or None, "telegram_chat_id": tg_chat or None,
-       "create_url": None, "state": {"last_cx33_notify": 0, "last_session_notify": 0}}
+       "telegram_token": tg_token, "telegram_chat_id": tg_chat or None,
+       "auto_create": False,
+       "state": {"last_cx33_notify": 0, "last_session_notify": 0,
+                 "last_stock_notify": 0, "last_check_fail_notify": 0}}
 p = os.path.join(w, "config.json")
 json.dump(cfg, open(p, "w"), indent=2)
 os.chmod(p, 0o600)
@@ -184,6 +192,9 @@ echo "==> 首次试运行（演习模式：只查库存，绝不下单）"
 if "$VPY" "$WORKDIR/cx-monitor.py" --dry-run; then
   systemctl enable --now cx-monitor.timer
   echo "    演习通过，定时任务已启用（每小时 :08 跑一次）"
+  echo "    注意：自动建机默认关闭。有货时只会通知你，不会自动下单。"
+  echo "    等你确认演习结果没问题，再手动开启："
+  echo "      python3 -c \"import json;p='/root/.cx-monitor/config.json';c=json.load(open(p));c['auto_create']=True;json.dump(c,open(p,'w'),indent=2)\""
 else
   echo "    演习没通过，定时任务未启用。请看上方日志排查，或重跑本脚本。"
   exit 1
