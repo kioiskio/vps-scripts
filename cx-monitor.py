@@ -18,7 +18,8 @@ CFG_PATH = os.path.join(WORKDIR, "config.json")
 LOG_PATH = os.path.join(WORKDIR, "check.log")
 
 EXPECTED = {"name": "cx43", "cores": 8, "memory_gb": 16, "disk_gb": 160,
-            "price_monthly": 18.49, "location": "fsn1", "new_name": "kio-dev-3"}
+            "price_monthly": 18.49, "location": "hel1", "new_name": "kio-dev-3"}
+DRY_RUN = "--dry-run" in sys.argv
 
 def log(msg):
     line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}"
@@ -28,7 +29,7 @@ def log(msg):
 
 def api(cfg, method, path, body=None):
     req = urllib.request.Request(
-        "https://api.hetzner.cloud/v1" + path,
+        "https://api.hetzner.cloud" + path,
         data=json.dumps(body).encode() if body is not None else None,
         headers={"Authorization": f"Bearer {cfg['api_token']}",
                  "Content-Type": "application/json"},
@@ -88,7 +89,7 @@ def check_stock():
                         pg.locator(sel).first.click(); pg.wait_for_timeout(4000); break
             # 选 Helsinki
             clicked = False
-            for sel in ['text=Helsinki', '[data-testid*="fsn1" i]', 'text=fsn1']:
+            for sel in ['text=Helsinki', '[data-testid*="hel1" i]', 'text=hel1']:
                 loc = pg.locator(sel).first
                 if loc.count():
                     loc.click(); clicked = True; pg.wait_for_timeout(2500); break
@@ -185,7 +186,13 @@ def main():
         return 1
 
     if cx43:
-        log("CX43 Helsinki 有货 → 按授权自动建机")
+        log("CX43 Helsinki 有货")
+        if DRY_RUN:
+            log("DRY-RUN：演习模式，不下单")
+            notify(cfg, "Hetzner 监控自检：CX43 Helsinki 有货（演习模式，未下单）。"
+                         "确认无误后，取消演习即可按授权自动建机。")
+            return 0
+        log("按授权自动建机")
         try:
             s = ensure_kio_dev_3(cfg)
             ip = (s.get("public_net") or {}).get("ipv4", {}).get("ip")
