@@ -127,7 +127,12 @@ with sync_playwright() as p:
         # 可能的 2FA
         code_inputs = pg.locator('input[name*="code" i], input[name*="otp" i], input[autocomplete="one-time-code"]')
         if code_inputs.count() > 0:
-            code = input("    检测到两步验证，请输入验证码: ").strip()
+            # 注意：本脚本经 heredoc 输入，stdin 已读完，不能用 input()；
+            # 验证码必须从 /dev/tty（用户真实终端）读取
+            sys.stdout.write("    检测到两步验证，请输入验证码: ")
+            sys.stdout.flush()
+            with open("/dev/tty") as tty:
+                code = tty.readline().strip()
             code_inputs.first.fill(code)
             pg.locator('button[type="submit"]').first.click()
             pg.wait_for_timeout(4000)
