@@ -174,6 +174,14 @@ def ensure_kio_dev_3(cfg):
         log(f"kio-dev-3 已存在(id={s['id']}, status={s['status']})，不再重复建")
         return s
 
+    # 下单前复核：配置里的防火墙必须还存在，否则停手（不允许降级为无防火墙）
+    if cfg.get("firewall_id"):
+        try:
+            api(cfg, "GET", f"/v1/firewalls/{cfg['firewall_id']}")
+        except RuntimeError:
+            raise RuntimeError(
+                f"配置的防火墙 id={cfg['firewall_id']} 已不存在，停手待确认，绝不降级建无防火墙机器")
+
     body = {"name": EXPECTED["new_name"], "server_type": "cx43",
             "location": EXPECTED["location"], "image": cfg["image"],
             "ssh_keys": [cfg["ssh_key"]], "labels": {"purpose": "dev"}}
