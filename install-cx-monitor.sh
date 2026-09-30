@@ -47,37 +47,63 @@ fi
 echo "    token 有效"
 
 echo "==> 3/6 读取 kio-dev-2 的配置（镜像 / SSH key / 防火墙）"
-eval "$(CX_API_TOKEN="$API_TOKEN" python3 - <<'PYEOF'
-import json, os, urllib.request
+CX_API_TOKEN="$API_TOKEN" python3 - <<'PYEOF'
+import json, os, sys, urllib.request
 token = os.environ["CX_API_TOKEN"]
 def get(path):
     req = urllib.request.Request("https://api.hetzner.cloud" + path,
         headers={"Authorization": "Bearer " + token})
     return json.load(urllib.request.urlopen(req, timeout=20))
-srv = get("/v1/servers?name=kio-dev-2")["servers"][0]
+
+srv = get("/v1/servers?name=kio-dev-2")["servers"]
+if not srv:
+    sys.exit("FATAL: API 里找不到 kio-dev-2，停手")
+srv = srv[0]
 sid = srv["id"]
 img = srv["image"]["name"] or srv["image"]["id"]
-fw_id = ""
+
+# 防火墙：applied_to 是唯一可信字段（官方文档结构）。
+# 字段缺失 = API 结构变了 → 直接停，不允许降级成"无防火墙"。
+fw_id, fw_name = "", ""
 for fw in get("/v1/firewalls")["firewalls"]:
-    for r in fw.get("resources", []):
-        if r.get("type") == "server" and r.get("server", {}).get("id") == sid:
-            fw_id = str(fw["id"]); break
-    if fw_id: break
+    if "applied_to" not in fw:
+        sys.exit("FATAL: firewall 对象没有 applied_to 字段，API 结构可能变了，停手")
+    for a in fw["applied_to"]:
+        if a.get("type") == "server" and (a.get("server") or {}).get("id") == sid:
+            fw_id, fw_name = str(fw["id"]), fw["name"]
+            break
+    if fw_id:
+        break
+
 auth = open("/root/.ssh/authorized_keys").read().split()
 key_name = ""
 for k in get("/v1/ssh_keys")["ssh_keys"]:
     parts = k["public_key"].split()
     if len(parts) >= 2 and parts[1] in auth:
-        key_name = k["name"]; break
-print(f"SRV_ID={sid}")
-print(f"IMAGE={img}")
-print(f"FW_ID={fw_id}")
-print(f"SSH_KEY_NAME={key_name}")
+        key_name = k["name"]
+        break
+if not key_name:
+    sys.exit("FATAL: authorized_keys 没匹配到任何 API 里的 SSH key，停手")
+
+os.makedirs("/root/.cx-monitor", exist_ok=True)
+p = "/root/.cx-monitor/detected.json"
+json.dump({"server_id": sid, "image": img, "ssh_key": key_name,
+           "firewall_id": int(fw_id) if fw_id else None,
+           "firewall_name": fw_name}, open(p, "w"), indent=2)
+os.chmod(p, 0o600)
+print(f"    服务器: kio-dev-2 (id={sid})")
+print(f"    镜像: {img}")
+print(f"    SSH key: {key_name}")
+if fw_id:
+    print(f"    防火墙: {fw_name} (id={fw_id})")
+else:
+    print("    防火墙: 未检测到 —— kio-dev-2 当前没有挂载防火墙")
 PYEOF
-)"
-echo "    kio-dev-2: id=$SRV_ID image=$IMAGE"
-[[ -n "$FW_ID" ]] && echo "    firewall id=$FW_ID" || echo "    未发现挂载的防火墙，新机器将不挂防火墙"
-[[ -n "$SSH_KEY_NAME" ]] && echo "    ssh key=$SSH_KEY_NAME" || { echo "    没匹配到 SSH key，退出"; exit 1; }
+echo
+echo "    新机器 kio-dev-3 将按以上配置创建（同镜像/同 SSH key/同防火墙）。"
+echo "    如果上面显示的防火墙跟你预期的不一致，现在就停，不要继续。"
+read -rp "    确认无误请输入 yes 继续: " CONFIRM
+[[ "$CONFIRM" == "yes" ]] || { echo "已退出，未做任何更改"; exit 1; }
 
 echo "==> 4/6 一次性登录 console.hetzner.com（密码仅本次使用，不存盘）"
 read -rp "    Hetzner 账号邮箱: " H_EMAIL
@@ -136,15 +162,17 @@ PYEOF
 fi
 [[ -n "$TG_CHAT" ]] && echo "    Telegram 通知目标 chat_id=$TG_CHAT" || echo "    跳过 Telegram 通知（只写日志）"
 
-# 写配置（0600），密钥走环境变量，不进 argv
-CX_API_TOKEN="$API_TOKEN" CX_TG_TOKEN="$TG_TOKEN" "$VPY" - "$WORKDIR" "$IMAGE" "$SSH_KEY_NAME" "$FW_ID" "$TG_CHAT" <<'PYEOF'
+# 写配置（0600）：密钥走环境变量，检测值从 detected.json 读，不再经 shell 传递
+CX_API_TOKEN="$API_TOKEN" CX_TG_TOKEN="$TG_TOKEN" "$VPY" - "$WORKDIR" "$TG_CHAT" <<'PYEOF'
 import json,os,sys
-w, image, key, fw, tg_chat = sys.argv[1:6]
-token = os.environ["CX_API_TOKEN"]
-tg_token = os.environ.get("CX_TG_TOKEN") or None
-cfg = {"api_token": token, "image": image, "ssh_key": key,
-       "firewall_id": int(fw) if fw else None,
-       "telegram_token": tg_token, "telegram_chat_id": tg_chat or None,
+w, tg_chat = sys.argv[1], sys.argv[2]
+det = json.load(open(os.path.join(w, "detected.json")))
+cfg = {"api_token": os.environ["CX_API_TOKEN"],
+       "image": det["image"], "ssh_key": det["ssh_key"],
+       "firewall_id": det["firewall_id"],
+       "firewall_name": det["firewall_name"],
+       "telegram_token": os.environ.get("CX_TG_TOKEN") or None,
+       "telegram_chat_id": tg_chat or None,
        "auto_create": False,
        "state": {"last_cx33_notify": 0, "last_session_notify": 0,
                  "last_stock_notify": 0, "last_check_fail_notify": 0}}
@@ -153,7 +181,7 @@ json.dump(cfg, open(p, "w"), indent=2)
 os.chmod(p, 0o600)
 print("    配置已写入（0600）")
 PYEOF
-unset API_TOKEN H_PASS
+unset API_TOKEN H_PASS H_EMAIL TG_TOKEN TG_CHAT CONFIRM
 
 echo "==> 6/6 下载监控脚本 + 写入 systemd 定时任务"
 RAW=https://raw.githubusercontent.com/kioiskio/vps-scripts/710f1715e40def7284a15e03f31e92680a8d5bb9
